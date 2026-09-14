@@ -9,7 +9,7 @@ const fs = require("fs");
 const path = require("path");
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000; // Render assigns its own PORT — 3000 is only for running locally
 
 const STORAGE_DIR = path.join(__dirname, "storage");
 fs.mkdirSync(STORAGE_DIR, { recursive: true });
