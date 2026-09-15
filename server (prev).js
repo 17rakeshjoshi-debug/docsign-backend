@@ -32,7 +32,6 @@ app.post("/api/documents/upload", upload.single("doodleImage"), (req, res) => {
     strokes: strokes ? JSON.parse(strokes) : [],
     pageWidthPts: Number(pageWidthPts) || 0,
     pageHeightPts: Number(pageHeightPts) || 0,
-    cancelRequested: false,
     createdAt: new Date().toISOString(),
   };
 
@@ -70,32 +69,6 @@ app.post("/api/documents/:id/ack", (req, res) => {
   if (!job) return res.status(404).json({ error: "not found" });
   job.status = "sent_to_machine";
   console.log(`Document ${req.params.id} handed off to Bachin Draw`);
-  res.json({ ok: true });
-});
-
-// 5) Phone app calls this when the user taps Cancel during live signing
-app.post("/api/documents/:id/cancel", (req, res) => {
-  const job = jobs[req.params.id];
-  if (!job) return res.status(404).json({ error: "not found" });
-  job.cancelRequested = true;
-  console.log(`Cancel requested for document ${req.params.id}`);
-  res.json({ ok: true });
-});
-
-// 6) Listener polls this (in the background, WHILE a job is being drawn)
-// to check if a cancel was requested mid-signing.
-app.get("/api/documents/:id/cancel-status", (req, res) => {
-  const job = jobs[req.params.id];
-  if (!job) return res.status(404).json({ error: "not found" });
-  res.json({ cancelRequested: job.cancelRequested });
-});
-
-// 7) Listener calls this if a job was actually stopped partway through
-app.post("/api/documents/:id/cancelled", (req, res) => {
-  const job = jobs[req.params.id];
-  if (!job) return res.status(404).json({ error: "not found" });
-  job.status = "cancelled";
-  console.log(`Document ${req.params.id} was cancelled mid-signing`);
   res.json({ ok: true });
 });
 
