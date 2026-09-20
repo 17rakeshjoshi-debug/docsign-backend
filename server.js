@@ -32,7 +32,8 @@ app.post("/api/documents/upload", upload.single("doodleImage"), (req, res) => {
     strokes: strokes ? JSON.parse(strokes) : [],
     pageWidthPts: Number(pageWidthPts) || 0,
     pageHeightPts: Number(pageHeightPts) || 0,
-    cancelRequested: false,
+    cancelRequested: false,   // set by /abort (the actual "stop and go home")
+    pauseRequested: false,    // set by /pause — pen stops exactly where it is, no reset
     createdAt: new Date().toISOString(),
   };
 
@@ -73,21 +74,45 @@ app.post("/api/documents/:id/ack", (req, res) => {
   res.json({ ok: true });
 });
 
-// 5) Phone app calls this when the user taps Cancel during live signing
+// 5) Phone app calls this when the user taps Cancel from the pause screen —
+// this is the ACTUAL abort: listener soft-resets the machine, clears the
+// resulting GRBL alarm, and sends the pen back to the origin.
 app.post("/api/documents/:id/cancel", (req, res) => {
   const job = jobs[req.params.id];
   if (!job) return res.status(404).json({ error: "not found" });
   job.cancelRequested = true;
-  console.log(`Cancel requested for document ${req.params.id}`);
+  console.log(`Abort requested for document ${req.params.id}`);
+  res.json({ ok: true });
+});
+
+// 5b) Phone app calls this when the user taps Cancel DURING signing — this
+// just pauses: the listener stops sending further G-code lines, leaving
+// the pen exactly where the last completed motion left it. No reset.
+app.post("/api/documents/:id/pause", (req, res) => {
+  const job = jobs[req.params.id];
+  if (!job) return res.status(404).json({ error: "not found" });
+  job.pauseRequested = true;
+  console.log(`Pause requested for document ${req.params.id}`);
+  res.json({ ok: true });
+});
+
+// 5c) Phone app calls this when the user taps "Continue Signing" on the
+// pause screen — clears the pause flag so the listener resumes sending
+// the remaining lines from exactly where it stopped.
+app.post("/api/documents/:id/resume", (req, res) => {
+  const job = jobs[req.params.id];
+  if (!job) return res.status(404).json({ error: "not found" });
+  job.pauseRequested = false;
+  console.log(`Resume requested for document ${req.params.id}`);
   res.json({ ok: true });
 });
 
 // 6) Listener polls this (in the background, WHILE a job is being drawn)
-// to check if a cancel was requested mid-signing.
+// to check whether a pause or an abort was requested mid-signing.
 app.get("/api/documents/:id/cancel-status", (req, res) => {
   const job = jobs[req.params.id];
   if (!job) return res.status(404).json({ error: "not found" });
-  res.json({ cancelRequested: job.cancelRequested });
+  res.json({ cancelRequested: job.cancelRequested, pauseRequested: job.pauseRequested });
 });
 
 // 7) Listener calls this if a job was actually stopped partway through
