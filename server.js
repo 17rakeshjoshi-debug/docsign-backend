@@ -9,6 +9,28 @@ const fs = require("fs");
 const path = require("path");
 
 const app = express();
+
+// Quick diagnostic: open this URL directly in a browser to check whether
+// the LIVE Render deployment actually has /pause and /resume yet. If this
+// route itself 404s, or "pause"/"resume" are missing from the list below,
+// the currently-running backend predates them — redeploy server.js.
+app.get("/", (req, res) => {
+  res.json({
+    ok: true,
+    service: "docsign-backend",
+    routes: [
+      "POST /api/documents/upload",
+      "GET /api/documents/pending",
+      "GET /api/documents/:id/image",
+      "POST /api/documents/:id/ack",
+      "POST /api/documents/:id/cancel",
+      "POST /api/documents/:id/pause",
+      "POST /api/documents/:id/resume",
+      "GET /api/documents/:id/cancel-status",
+      "POST /api/documents/:id/cancelled",
+    ],
+  });
+});
 const PORT = process.env.PORT || 3000; // Render assigns its own PORT — 3000 is only for running locally
 
 const STORAGE_DIR = path.join(__dirname, "storage");
