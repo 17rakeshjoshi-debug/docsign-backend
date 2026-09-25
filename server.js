@@ -1,19 +1,19 @@
 // Minimal backend: receives the signed doodle from the phone app,
-// and serves it to the computer-side listener that talks to Bachin Draw.
+// serves it to the computer-side listener, and acts as a WebRTC signaling relay.
 //
-// Run: npm install && node server.js
+// Run: npm install express multer ws && node server.js
 
 const express = require("express");
 const multer = require("multer");
 const fs = require("fs");
 const path = require("path");
+const http = require("http");
+const WebSocket = require("ws");
 
 const app = express();
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ server });
 
-// Quick diagnostic: open this URL directly in a browser to check whether
-// the LIVE Render deployment actually has /pause and /resume yet. If this
-// route itself 404s, or "pause"/"resume" are missing from the list below,
-// the currently-running backend predates them — redeploy server.js.
 app.get("/", (req, res) => {
   res.json({
     ok: true,
@@ -28,27 +28,17 @@ app.get("/", (req, res) => {
       "POST /api/documents/:id/resume",
       "GET /api/documents/:id/cancel-status",
       "POST /api/documents/:id/cancelled",
-      "POST /api/webrtc/reset",
-      "POST /api/webrtc/offer",
-      "GET /api/webrtc/offer",
-      "POST /api/webrtc/answer",
-      "GET /api/webrtc/answer",
-      "POST /api/webrtc/ice-candidate",
-      "GET /api/webrtc/ice-candidates",
     ],
   });
 });
-const PORT = process.env.PORT || 3000; // Render assigns its own PORT — 3000 is only for running locally
+const PORT = process.env.PORT || 3000;
 
 const STORAGE_DIR = path.join(__dirname, "storage");
 fs.mkdirSync(STORAGE_DIR, { recursive: true });
 
 const upload = multer({ dest: STORAGE_DIR });
+const jobs = {}; 
 
-// In-memory job list — swap for a real DB later, fine for getting this running now.
-const jobs = {}; // documentId -> { status, imagePath, strokes, createdAt }
-
-// 1) Phone app uploads the doodle-only (transparent) image here
 app.post("/api/documents/upload", upload.single("doodleImage"), (req, res) => {
   const { documentId, strokes, pageWidthPts, pageHeightPts } = req.body;
   if (!documentId || !req.file) {
@@ -61,8 +51,8 @@ app.post("/api/documents/upload", upload.single("doodleImage"), (req, res) => {
     strokes: strokes ? JSON.parse(strokes) : [],
     pageWidthPts: Number(pageWidthPts) || 0,
     pageHeightPts: Number(pageHeightPts) || 0,
-    cancelRequested: false,   // set by /abort (the actual "stop and go home")
-    pauseRequested: false,    // set by /pause — pen stops exactly where it is, no reset
+    cancelRequested: false,   
+    pauseRequested: false,    
     createdAt: new Date().toISOString(),
   };
 
@@ -70,9 +60,6 @@ app.post("/api/documents/upload", upload.single("doodleImage"), (req, res) => {
   res.json({ ok: true, documentId });
 });
 
-// 2) Computer-side listener polls this to find new jobs to send to Bachin Draw.
-// Includes the raw strokes + page size directly so the listener can build G-code
-// without a second round-trip.
 app.get("/api/documents/pending", (req, res) => {
   const pending = Object.entries(jobs)
     .filter(([, job]) => job.status === "pending_machine")
@@ -87,14 +74,12 @@ app.get("/api/documents/pending", (req, res) => {
   res.json(pending);
 });
 
-// 3) Serves the actual signed image file for the listener to download
 app.get("/api/documents/:id/image", (req, res) => {
   const job = jobs[req.params.id];
   if (!job) return res.status(404).end();
   res.sendFile(path.resolve(job.imagePath));
 });
 
-// 4) Listener calls this once it has handed the file to Bachin Draw
 app.post("/api/documents/:id/ack", (req, res) => {
   const job = jobs[req.params.id];
   if (!job) return res.status(404).json({ error: "not found" });
@@ -103,9 +88,6 @@ app.post("/api/documents/:id/ack", (req, res) => {
   res.json({ ok: true });
 });
 
-// 5) Phone app calls this when the user taps Cancel from the pause screen —
-// this is the ACTUAL abort: listener soft-resets the machine, clears the
-// resulting GRBL alarm, and sends the pen back to the origin.
 app.post("/api/documents/:id/cancel", (req, res) => {
   const job = jobs[req.params.id];
   if (!job) return res.status(404).json({ error: "not found" });
@@ -114,9 +96,6 @@ app.post("/api/documents/:id/cancel", (req, res) => {
   res.json({ ok: true });
 });
 
-// 5b) Phone app calls this when the user taps Cancel DURING signing — this
-// just pauses: the listener stops sending further G-code lines, leaving
-// the pen exactly where the last completed motion left it. No reset.
 app.post("/api/documents/:id/pause", (req, res) => {
   const job = jobs[req.params.id];
   if (!job) return res.status(404).json({ error: "not found" });
@@ -125,9 +104,6 @@ app.post("/api/documents/:id/pause", (req, res) => {
   res.json({ ok: true });
 });
 
-// 5c) Phone app calls this when the user taps "Continue Signing" on the
-// pause screen — clears the pause flag so the listener resumes sending
-// the remaining lines from exactly where it stopped.
 app.post("/api/documents/:id/resume", (req, res) => {
   const job = jobs[req.params.id];
   if (!job) return res.status(404).json({ error: "not found" });
@@ -136,15 +112,12 @@ app.post("/api/documents/:id/resume", (req, res) => {
   res.json({ ok: true });
 });
 
-// 6) Listener polls this (in the background, WHILE a job is being drawn)
-// to check whether a pause or an abort was requested mid-signing.
 app.get("/api/documents/:id/cancel-status", (req, res) => {
   const job = jobs[req.params.id];
   if (!job) return res.status(404).json({ error: "not found" });
   res.json({ cancelRequested: job.cancelRequested, pauseRequested: job.pauseRequested });
 });
 
-// 7) Listener calls this if a job was actually stopped partway through
 app.post("/api/documents/:id/cancelled", (req, res) => {
   const job = jobs[req.params.id];
   if (!job) return res.status(404).json({ error: "not found" });
@@ -153,93 +126,21 @@ app.post("/api/documents/:id/cancelled", (req, res) => {
   res.json({ ok: true });
 });
 
-app.listen(PORT, () => {
-  console.log(`Backend listening on http://localhost:${PORT}`);
+// WebRTC Signaling Relay & Command Bus
+const peers = new Set();
+wss.on("connection", (ws) => {
+  peers.add(ws);
+  ws.on("message", (message) => {
+    // Relay SDP offers/answers and custom JSON commands like "capture"
+    for (let peer of peers) {
+      if (peer !== ws && peer.readyState === WebSocket.OPEN) {
+        peer.send(message.toString());
+      }
+    }
+  });
+  ws.on("close", () => peers.delete(ws));
 });
 
-// ---------------------------------------------------------------------------
-// WEBRTC SIGNALING RELAY
-//
-// This is what replaces ngrok. The host PC no longer needs to be reachable
-// from the internet at all — it just polls this relay (outbound only, same
-// as it already polls /api/documents/pending), the same way the phone does.
-// Once both sides have exchanged an offer/answer and their ICE candidates,
-// the actual video flows PEER-TO-PEER directly between phone and PC — this
-// relay only ever carries a few KB of connection-setup text, never video.
-//
-// Single global session slot (not per-document): there's only ever one
-// phone and one host talking at a time in this project, so no session IDs
-// are needed. The phone calls /reset when it opens the live feed screen,
-// to clear out any stale offer/candidates left over from a previous attempt.
-// ---------------------------------------------------------------------------
-
-let webrtcOffer = null;      // { sdp, type } — set by the phone
-let webrtcAnswer = null;     // { sdp, type } — set by the host
-let iceCandidatesForHost = [];   // candidates gathered by the phone, for the host to apply
-let iceCandidatesForPhone = [];  // candidates gathered by the host, for the phone to apply
-
-app.post("/api/webrtc/reset", (req, res) => {
-  webrtcOffer = null;
-  webrtcAnswer = null;
-  iceCandidatesForHost = [];
-  iceCandidatesForPhone = [];
-  console.log("WebRTC signaling state reset");
-  res.json({ ok: true });
-});
-
-// Phone posts its offer here once it's ready to connect.
-app.post("/api/webrtc/offer", (req, res) => {
-  const { sdp, type } = req.body;
-  if (!sdp || !type) return res.status(400).json({ error: "sdp and type are required" });
-  webrtcOffer = { sdp, type };
-  webrtcAnswer = null; // a fresh offer invalidates any previous answer
-  console.log("WebRTC offer received from phone");
-  res.json({ ok: true });
-});
-
-// Host polls this until an offer shows up.
-app.get("/api/webrtc/offer", (req, res) => {
-  res.json({ offer: webrtcOffer });
-});
-
-// Host posts its answer once it's built one from the offer.
-app.post("/api/webrtc/answer", (req, res) => {
-  const { sdp, type } = req.body;
-  if (!sdp || !type) return res.status(400).json({ error: "sdp and type are required" });
-  webrtcAnswer = { sdp, type };
-  console.log("WebRTC answer received from host");
-  res.json({ ok: true });
-});
-
-// Phone polls this until the host's answer shows up.
-app.get("/api/webrtc/answer", (req, res) => {
-  res.json({ answer: webrtcAnswer });
-});
-
-// Either side posts ICE candidates as they're discovered ("trickle ICE").
-// `from` says who found it, which decides which queue it lands in.
-app.post("/api/webrtc/ice-candidate", (req, res) => {
-  const { from, candidate } = req.body;
-  if (!candidate || (from !== "phone" && from !== "host")) {
-    return res.status(400).json({ error: "from ('phone'|'host') and candidate are required" });
-  }
-  if (from === "phone") iceCandidatesForHost.push(candidate);
-  else iceCandidatesForPhone.push(candidate);
-  res.json({ ok: true });
-});
-
-// Each side polls its own queue and drains it (candidates are only useful once).
-app.get("/api/webrtc/ice-candidates", (req, res) => {
-  const forSide = req.query.for;
-  if (forSide === "host") {
-    const batch = iceCandidatesForHost;
-    iceCandidatesForHost = [];
-    return res.json({ candidates: batch });
-  }
-  if (forSide === "phone") {
-    const batch = iceCandidatesForPhone;
-    iceCandidatesForPhone = [];
-    return res.json({ candidates: batch });
-  }
-  res.status(400).json({ error: "?for=host or ?for=phone is required" });
+server.listen(PORT, () => {
+  console.log(`Backend and Signaling listening on port ${PORT}`);
 });
