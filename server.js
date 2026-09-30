@@ -51,14 +51,20 @@ app.get("/", (req, res) => {
 });
 
 // YouTube Live Stream Active ID Routes
+// POST { "videoId": "<id>" } sets the live stream; POST { "videoId": "" } clears it
+// (the host app clears it on Disconnect so the phone never loads an ended stream).
 app.post('/api/live-stream/active-id', (req, res) => {
-    const { videoId } = req.body;
-    if (videoId) {
-        activeVideoId = videoId;
-        console.log(`Active YouTube Live Stream ID updated: ${activeVideoId}`);
+    const { videoId } = req.body || {};
+    if (typeof videoId === "string") {
+        activeVideoId = videoId.trim();
+        console.log(
+            activeVideoId
+                ? `Active YouTube Live Stream ID updated: ${activeVideoId}`
+                : "Active YouTube Live Stream ID cleared"
+        );
         res.status(200).json({ success: true, videoId: activeVideoId });
     } else {
-        res.status(400).json({ error: "videoId is required" });
+        res.status(400).json({ error: "videoId (string) is required" });
     }
 });
 
