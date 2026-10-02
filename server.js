@@ -1,18 +1,34 @@
-// Minimal backend: receives the signed doodle from the phone app,
-// serves it to the computer-side listener, and acts as a WebRTC signaling relay.
-//
-// Run: npm install express multer ws && node server.js
-
+// Minimal backend: receives signed doodles and manages YouTube Live stream sync.
 const express = require("express");
 const multer = require("multer");
 const fs = require("fs");
 const path = require("path");
 const http = require("http");
-const WebSocket = require("ws");
 
 const app = express();
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
+
+// Native CORS middleware (no external package needed!)
+app.use((req, res, next) => {
+    res.header("Access-Control-Allow-Origin", "*");
+    res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
+    res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    if (req.method === 'OPTIONS') {
+        return res.sendStatus(200);
+    }
+    next();
+});
+
+app.use(express.json());
+
+const PORT = process.env.PORT || 3000;
+
+const STORAGE_DIR = path.join(__dirname, "storage");
+fs.mkdirSync(STORAGE_DIR, { recursive: true });
+
+const upload = multer({ dest: STORAGE_DIR });
+const jobs = {}; 
+let activeVideoId = ""; 
 
 app.get("/", (req, res) => {
   res.json({
@@ -28,17 +44,35 @@ app.get("/", (req, res) => {
       "POST /api/documents/:id/resume",
       "GET /api/documents/:id/cancel-status",
       "POST /api/documents/:id/cancelled",
+      "POST /api/live-stream/active-id",
+      "GET /api/live-stream/active-id",
     ],
   });
 });
-const PORT = process.env.PORT || 3000;
 
-const STORAGE_DIR = path.join(__dirname, "storage");
-fs.mkdirSync(STORAGE_DIR, { recursive: true });
+// YouTube Live Stream Active ID Routes
+// POST { "videoId": "<id>" } sets the live stream; POST { "videoId": "" } clears it
+// (the host app clears it on Disconnect so the phone never loads an ended stream).
+app.post('/api/live-stream/active-id', (req, res) => {
+    const { videoId } = req.body || {};
+    if (typeof videoId === "string") {
+        activeVideoId = videoId.trim();
+        console.log(
+            activeVideoId
+                ? `Active YouTube Live Stream ID updated: ${activeVideoId}`
+                : "Active YouTube Live Stream ID cleared"
+        );
+        res.status(200).json({ success: true, videoId: activeVideoId });
+    } else {
+        res.status(400).json({ error: "videoId (string) is required" });
+    }
+});
 
-const upload = multer({ dest: STORAGE_DIR });
-const jobs = {}; 
+app.get('/api/live-stream/active-id', (req, res) => {
+    res.status(200).json({ videoId: activeVideoId });
+});
 
+// Document Workflow Routes
 app.post("/api/documents/upload", upload.single("doodleImage"), (req, res) => {
   const { documentId, strokes, pageWidthPts, pageHeightPts } = req.body;
   if (!documentId || !req.file) {
@@ -51,8 +85,8 @@ app.post("/api/documents/upload", upload.single("doodleImage"), (req, res) => {
     strokes: strokes ? JSON.parse(strokes) : [],
     pageWidthPts: Number(pageWidthPts) || 0,
     pageHeightPts: Number(pageHeightPts) || 0,
-    cancelRequested: false,   
-    pauseRequested: false,    
+    cancelRequested: false,    
+    pauseRequested: false,       
     createdAt: new Date().toISOString(),
   };
 
@@ -84,7 +118,7 @@ app.post("/api/documents/:id/ack", (req, res) => {
   const job = jobs[req.params.id];
   if (!job) return res.status(404).json({ error: "not found" });
   job.status = "sent_to_machine";
-  console.log(`Document ${req.params.id} handed off to Bachin Draw`);
+  console.log(`Document ${req.params.id} handed off to Machine`);
   res.json({ ok: true });
 });
 
@@ -126,21 +160,6 @@ app.post("/api/documents/:id/cancelled", (req, res) => {
   res.json({ ok: true });
 });
 
-// WebRTC Signaling Relay & Command Bus
-const peers = new Set();
-wss.on("connection", (ws) => {
-  peers.add(ws);
-  ws.on("message", (message) => {
-    // Relay SDP offers/answers and custom JSON commands like "capture"
-    for (let peer of peers) {
-      if (peer !== ws && peer.readyState === WebSocket.OPEN) {
-        peer.send(message.toString());
-      }
-    }
-  });
-  ws.on("close", () => peers.delete(ws));
-});
-
 server.listen(PORT, () => {
-  console.log(`Backend and Signaling listening on port ${PORT}`);
+  console.log(`Backend server listening on port ${PORT}`);
 });
